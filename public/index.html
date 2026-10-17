@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LabLens: AR Lab Guide</title>
+<style>
+  :root { --ink:#111; --muted:#555; --line:#d9d9d9; --yellow:#fdbd00; --green:#1f9d6b; --bg:#fff; --soft:#f4f4f4; --bad:#b3261e; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: "Segoe UI", system-ui, Arial, sans-serif; color:var(--ink); background:var(--bg); line-height:1.45; }
+  main { max-width: 560px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 1.5rem; margin: 8px 0 12px; }
+  .stage { position:relative; background:#000; border-radius:10px; overflow:hidden; aspect-ratio: 4 / 3; }
+  video { width:100%; height:100%; object-fit:cover; display:block; }
+  .frame { position:absolute; inset:18% 14%; border:3px solid var(--yellow); border-radius:12px; pointer-events:none; }
+  .hint { position:absolute; left:0; right:0; bottom:0; padding:8px 12px; color:#fff; background:rgba(0,0,0,.55); font-size:.95rem; }
+  .row { display:flex; gap:8px; margin:12px 0; flex-wrap:wrap; align-items:center; }
+  button { font:inherit; font-weight:600; padding:12px 18px; border-radius:8px; border:2px solid var(--ink); background:#fff; color:var(--ink); cursor:pointer; }
+  button.primary { background:var(--yellow); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  button:focus-visible, input:focus-visible { outline:3px solid var(--green); outline-offset:2px; }
+  label { font-size:.95rem; color:var(--muted); }
+  #status { margin:4px 0 12px; font-weight:600; }
+  #status.error { color:var(--bad); }
+  .card { border:2px solid var(--ink); border-radius:10px; padding:14px 16px; margin-bottom:12px; }
+  .card h2 { margin:0 0 6px; font-size:1.25rem; }
+  .card h3 { margin:12px 0 4px; font-size:1rem; }
+  .card ul { margin:0; padding-left:20px; }
+  .card.safety { border-color:var(--bad); }
+  .card.safety h3 { color:var(--bad); }
+  details { background:var(--soft); border-radius:8px; padding:8px 12px; }
+  pre { white-space:pre-wrap; word-break:break-word; font-size:.8rem; margin:8px 0 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>LabLens: AR Lab Guide</h1>
+
+  <div class="stage">
+    <video id="video" playsinline muted></video>
+    <div class="frame" aria-hidden="true"></div>
+    <div class="hint" id="hint">Camera is off. Tap Start camera.</div>
+  </div>
+
+  <div class="row">
+    <button id="startBtn" class="primary">Start camera</button>
+    <button id="scanBtn" disabled>Scan equipment</button>
+    <label><input type="checkbox" id="auto" disabled> Scan every 3 seconds</label>
+  </div>
+
+  <div id="status" role="status">Ready.</div>
+  <div id="result"></div>
+  <details id="rawBox" hidden><summary>Raw response (for debugging)</summary><pre id="raw"></pre></details>
+</main>
+
+<script>
+// ---- Edit this list: one entry per instrument. Keys are lowercase class names from your model. ----
+// Check every specification and safety point against your lab manual or the maker’s manual.
+const EQUIPMENT = {
+  "vernier caliper": {
+    name: "Vernier caliper",
+    specs: ["Measures outside size, inside size and depth", "Check the least count printed on the scale"],
+    steps: ["Close the jaws and check the zero reading", "Place the object between the jaws without forcing them", "Read the main scale, then the vernier scale", "Add the two readings and correct for any zero error"],
+    safety: ["Do not force the jaws on the object", "Keep the jaws clean and dry"]
+  },
+  "micrometer": {
+    name: "Micrometer",
+    specs: ["Measures small outside dimensions", "Check the least count printed on the barrel"],
+    steps: ["Clean the anvil and spindle faces and check the zero reading", "Place the object and close the spindle using the ratchet", "Stop when the ratchet clicks", "Read the sleeve scale and the thimble scale"],
+    safety: ["Always use the ratchet, never over-tighten", "Do not drop it or store it with the faces closed tight"]
+  },
+  "multimeter": {
+    name: "Multimeter",
+    specs: ["Measures voltage, current and resistance", "Check the ranges and fuse rating printed on the meter"],
+    steps: ["Plug the probes into the correct sockets", "Turn the dial to the quantity and range you need", "Connect the probes to the circuit as the manual shows", "Read the display, then switch the meter off"],
+    safety: ["Never measure resistance on a powered circuit", "Never exceed the maximum range", "Check the probe leads for damage before use"]
+  },
+  "oscilloscope": {
+    name: "Oscilloscope",
+    specs: ["Displays voltage against time", "Check the bandwidth and maximum input voltage on the front panel"],
+    steps: ["Connect the probe and attach the ground clip first", "Set the volts and time scales", "Adjust the trigger to steady the waveform", "Read amplitude and period from the screen"],
+    safety: ["Do not exceed the maximum input voltage", "Always connect the ground clip to a safe reference point"]
+  }
+};
+
+const $ = (id) => document.getElementById(id);
+const video = $("video"), statusEl = $("status"), hint = $("hint");
+let stream = null, busy = false, timer = null;
+
+function setStatus(text, isError) {
+  statusEl.textContent = text;
+  statusEl.className = isError ? "error" : "";
+}
+
+$("startBtn").addEventListener("click", async () => {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
+    video.srcObject = stream;
+    await video.play();
+    hint.textContent = "Point at one instrument and tap Scan equipment.";
+    $("scanBtn").disabled = false;
+    $("auto").disabled = false;
+    setStatus("Camera is on.");
+  } catch (e) {
+    setStatus("The camera could not start: " + e.message + ". Allow camera access in the browser and use an https address.", true);
+  }
+});
+
+$("scanBtn").addEventListener("click", scan);
+$("auto").addEventListener("change", (e) => {
+  clearInterval(timer);
+  if (e.target.checked) timer = setInterval(scan, 3000);
+});
+
+async function scan() {
+  if (busy || !video.videoWidth) return;
+  busy = true;
+  setStatus("Scanning…");
+  try {
+    const scale = Math.min(1, 640 / video.videoWidth);
+    const c = document.createElement("canvas");
+    c.width = Math.round(video.videoWidth * scale);
+    c.height = Math.round(video.videoHeight * scale);
+    c.getContext("2d").drawImage(video, 0, 0, c.width, c.height);
+    const image = c.toDataURL("image/jpeg", 0.7).split(",")[1];
+
+    const res = await fetch("/.netlify/functions/recognize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image })
+    });
+    const text = await res.text();
+    showRaw(text);
+
+    let data;
+    try { data = JSON.parse(text); }
+    catch (e) {
+      setStatus("The server sent a web page instead of data, so the function is not deployed. Open /.netlify/functions/recognize on this site to check.", true);
+      return;
+    }
+    if (data.error) { setStatus(data.error + (data.detail ? " " + data.detail : ""), true); return; }
+
+    const found = findClasses(data).sort((a, b) => b.confidence - a.confidence);
+    if (!found.length) { setStatus("Nothing recognised. Move closer, improve the light, or check the raw response below."); $("result").innerHTML = ""; return; }
+    show(found[0]);
+  } catch (e) {
+    setStatus("Scan failed: " + e.message, true);
+  } finally {
+    busy = false;
+  }
+}
+
+// Walks the whole response and collects anything that looks like { class, confidence }.
+function findClasses(node, out = []) {
+  if (Array.isArray(node)) node.forEach((n) => findClasses(n, out));
+  else if (node && typeof node === "object") {
+    const label = node.class || node.class_name || node.label;
+    if (typeof label === "string") out.push({ label, confidence: Number(node.confidence) || 0 });
+    Object.values(node).forEach((v) => findClasses(v, out));
+  }
+  return out;
+}
+
+function esc(s) { return String(s).replace(/[&<>"]/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[m])); }
+function list(items) { return "<ul>" + items.map((i) => "<li>" + esc(i) + "</li>").join("") + "</ul>"; }
+
+function show(best) {
+  const pct = Math.round(best.confidence * 100);
+  const info = EQUIPMENT[best.label.toLowerCase()];
+  setStatus("Recognised: " + best.label + " (" + pct + "% sure)");
+  if (!info) {
+    $("result").innerHTML = '<div class="card"><h2>' + esc(best.label) + "</h2><p>No guide entry yet. Add one to the EQUIPMENT list in index.html.</p></div>";
+    return;
+  }
+  $("result").innerHTML =
+    '<div class="card"><h2>' + esc(info.name) + "</h2><h3>Specifications</h3>" + list(info.specs) + "<h3>How to use it</h3>" + list(info.steps) + "</div>" +
+    '<div class="card safety"><h3>Safety precautions</h3>' + list(info.safety) + "</div>";
+}
+
+function showRaw(text) {
+  $("rawBox").hidden = false;
+  $("raw").textContent = text.slice(0, 3000);
+}
+</script>
+</body>
+</html>
